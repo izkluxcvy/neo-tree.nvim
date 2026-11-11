@@ -841,6 +841,19 @@ end
 
 do
   local buf_cmd_lookup = { edit = "b", split = "sb", sp = "sb", vsplit = "vert sb", vs = "vert sb" }
+
+  ---Whether bufnr is an empty, unnamed, unmodified buffer that :e {file} would reuse.
+  ---@param bufnr integer
+  ---@return boolean
+  local is_reusable_empty_buffer = function(bufnr)
+    return vim.api.nvim_buf_is_valid(bufnr)
+      and vim.api.nvim_buf_get_name(bufnr) == ""
+      and vim.bo[bufnr].buftype == ""
+      and not vim.bo[bufnr].modified
+      and vim.api.nvim_buf_line_count(bufnr) == 1
+      and vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] == ""
+  end
+
   ---Open file in the appropriate window.
   ---@param state neotree.State
   ---@param path string The file to open
@@ -875,10 +888,13 @@ do
     local config = require("neo-tree").config
     local relative = config.open_files_using_relative_paths
     local path_to_open = relative and vim.fn.fnamemodify(path, ":.") or path
+    local is_new_buffer = false
     if bufnr == nil or bufnr < 0 then
+      local last_bufnr = vim.fn.bufnr("$")
       -- as mentioned in `:h open-file` (0.13 nightly only, atm), the best way to open a literal filepath and avoid
       -- filepath escaping issues is to add the buffer first, then open the buffer by number.
       bufnr = vim.fn.bufadd(path_to_open)
+      is_new_buffer = bufnr > last_bufnr
     end
 
     ---@return boolean result
@@ -898,7 +914,24 @@ do
         magic = { file = false, bar = false },
       })
       nvim_cmd_arg.range = nil
-      return assert(pcall(vim.api.nvim_cmd, nvim_cmd_arg, {}))
+
+      -- :e {file} reuses an empty [No Name] buffer for a new file, but `:buffer {bufnr}` doesn't.
+      -- Emulate that by wiping the no name buffer.
+      local prev_bufnr = vim.api.nvim_get_current_buf()
+      local reuse_prev = open_cmd == "edit"
+        and is_new_buffer
+        and prev_bufnr ~= bufnr
+        and is_reusable_empty_buffer(prev_bufnr)
+
+      local result, err = assert(pcall(vim.api.nvim_cmd, nvim_cmd_arg, {}))
+      if
+        reuse_prev
+        and is_reusable_empty_buffer(prev_bufnr)
+        and #vim.fn.win_findbuf(prev_bufnr) == 0
+      then
+        pcall(vim.api.nvim_buf_delete, prev_bufnr, {})
+      end
+      return result, err
     end
 
     ---@type boolean, string?
